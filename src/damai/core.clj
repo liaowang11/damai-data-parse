@@ -1,11 +1,20 @@
 (ns damai.core
   (:gen-class)
   (:import [java.nio ByteBuffer ByteOrder]
-           [java.io File FileInputStream])
-  (:use [clojure.string :only (split)])
+           [java.io File FileInputStream]
+           [org.apache.commons.codec.digest DigestUtils])
+  (:use [clojure.string :only (split join)])
   (:require [clojure.pprint :as pp]
-            [clj-http.client :as client]))
+            [clj-http.client :as client]
+            [clojure.java.browse]))
 
+(def damai-key "a8aa279a1bf9977c366d8ebc265054a0")
+
+(defn encrypt-sids
+  [sids]
+  (let [sids-str (if (coll? sids) (join "," sids) (str sids))
+        md5hex (DigestUtils/md5Hex (str sids-str damai-key))]
+    md5hex))
 
 (defmacro ubyte
   [b]
@@ -104,9 +113,11 @@
         p3              (debug (getP3 (:body xuanzuo-page)))
         standdata-page  (client/get "http://flashxml.damai.cn/StandData.aspx" {:query-params {"t" "8", "cid" cid, "p3" p3}})
         area-list       (getAreaList (:body standdata-page))]
-    (map (fn [e]
-            (let [url (format "http://sseat.damai.cn/xuanzuo/io/%s/%s/%s/%s.txt" cid pid suffix (first e))
-                  bytes-buff (.order (ByteBuffer/wrap (getSeatByteArray url)) ByteOrder/LITTLE_ENDIAN)]
-              (print "Requested: " url "\n")
-              (pretty-print-seatsinfo (getSeatObjects bytes-buff))))
-          (filter #(not= (second %) "0") area-list))))
+    (let [seats-by-area (map (fn [e]
+                               (let [url (format "http://sseat.damai.cn/xuanzuo/io/%s/%s/%s/%s.txt" cid pid suffix (first e))
+                                     bytes-buff (.order (ByteBuffer/wrap (getSeatByteArray url)) ByteOrder/LITTLE_ENDIAN)]
+                                 (print "Requested: " url "\n")
+                                 (getSeatObjects bytes-buff)))
+                             (filter #(not= (second %) "0") area-list))]
+      (let [sid (:seatId (rand-nth (rand-nth (rand-nth seats-by-area))))]
+        (clojure.java.browse/browse-url (format "http://shopping.damai.cn/eticket/setorder.aspx?sid=%s&cid=%s&pid=%s&_m=%s" sid cid pid (encrypt-sids sid)))))))
