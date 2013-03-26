@@ -2,12 +2,47 @@
   (:gen-class)
   (:import [java.nio ByteBuffer ByteOrder]
            [java.io File FileInputStream])
-  (:require [clojure.pprint :as pp]))
+  (:use [clojure.string :only (split)])
+  (:require [clojure.pprint :as pp]
+            [clj-http.client :as client]))
 
 
 (defmacro ubyte
   [b]
   `(bit-and ~b 0xff))
+
+(defn getSeatByteArray
+  [url]
+  (:body (client/get url {:as :byte-array :conn-timeout 1000})))
+
+(defn getPerformID
+  [content]
+  (if-let [pid (re-find #"performID=(\d+)" content)]
+    (second pid)))
+
+(defn getSuffix
+  [content]
+  (if-let [suffix (re-find #"&suffix=([^&]+)&" content)]
+    (second suffix)))
+
+(defn getCid
+  [content]
+  (if-let [cid (re-find #"&cid=([^&]+)&" content)]
+    (second cid)))
+
+(defn getP3
+  [content]
+  (if-let [p3 (re-find #"p3=([^&]+)&" content)]
+    (second p3)))
+
+(defn getAreaList
+  [content]
+  (apply hash-map (mapcat #(split % #",") (split content #"\|"))))
+
+
+(defn debug
+  [a]
+  (do (print a "\n") a))
 
 (defn getSeatObjects
 	"convert seat bytes to a vector of seatsinfo(map)"
@@ -45,7 +80,7 @@
                  (bit-test cls 7) (let [null-count (if (bit-test cls 5) (ubyte (.get bytes)) (bit-and cls 0x1f))]
                                     (dotimes [i null-count] (conj! row-result nil))
                                     (recur pai-id (inc col-id) row-result))
-                 (bit-test cls 6) (do (print "newline:" (.position bytes) "\n") (conj! result (persistent! row-result)) (recur (inc pai-id) col-id (transient [])))
+                 (bit-test cls 6) (do (conj! result (persistent! row-result)) (recur (inc pai-id) col-id (transient [])))
                  :else (recur pai-id col-id row-result)))
               (do (conj! result (persistent! row-result)) (persistent! result))))))
 
@@ -60,14 +95,18 @@
 ))
 
 (defn -main
-	[& args]
-	(let [filename "test.bin"
-              file (File. filename)
-              length (.length file)
-              fis (FileInputStream. filename)
-              bytes (byte-array length)
-              bytes-buff (do (.read fis bytes) (.order (ByteBuffer/wrap bytes) ByteOrder/LITTLE_ENDIAN))]
-          (print "Buffer Length:" (.limit bytes-buff) "\n")
-          (doto (getSeatObjects bytes-buff)
-              (pretty-print-seatsinfo)
-              (pp/pprint))))
+  [& args]
+  (let [main-page       (client/get (first args))
+        pid             (debug (getPerformID (:body main-page)))
+        xuanzuo-page    (client/get (str "http://seat.damai.cn/xuanzuo/" pid))
+        suffix          (debug (getSuffix (:body xuanzuo-page)))
+        cid             (debug (getCid (:body xuanzuo-page)))
+        p3              (debug (getP3 (:body xuanzuo-page)))
+        standdata-page  (client/get "http://flashxml.damai.cn/StandData.aspx" {:query-params {"t" "8", "cid" cid, "p3" p3}})
+        area-list       (getAreaList (:body standdata-page))]
+    (map (fn [e]
+            (let [url (format "http://sseat.damai.cn/xuanzuo/io/%s/%s/%s/%s.txt" cid pid suffix (first e))
+                  bytes-buff (.order (ByteBuffer/wrap (getSeatByteArray url)) ByteOrder/LITTLE_ENDIAN)]
+              (print "Requested: " url "\n")
+              (pretty-print-seatsinfo (getSeatObjects bytes-buff))))
+          (filter #(not= (second %) "0") area-list))))
